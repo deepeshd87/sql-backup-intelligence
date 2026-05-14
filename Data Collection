@@ -1,0 +1,119 @@
+/*
+=========================================================
+1. CREATE TABLE
+=========================================================
+*/
+
+TRUNCATE TABLE dbo.BackupMonitoringHistory
+
+IF OBJECT_ID('dbo.BackupMonitoringHistory') IS NULL
+BEGIN
+
+    CREATE TABLE dbo.BackupMonitoringHistory
+    (
+        BackupID BIGINT IDENTITY(1,1) PRIMARY KEY,
+        DatabaseName SYSNAME,
+        BackupStartDate DATETIME,
+        BackupFinishDate DATETIME,
+        BackupType VARCHAR(20),
+        DurationSeconds INT,
+        BackupSizeMB DECIMAL(18,2),
+        CompressedBackupSizeMB DECIMAL(18,2),
+        ChecksumStatus BIT,
+        LastLSN NUMERIC(25,0),
+        FirstLSN NUMERIC(25,0),
+        Wait_BACKUPIO BIGINT,
+        Wait_WRITELOG BIGINT,
+        Wait_ASYNC_IO_COMPLETION BIGINT,
+        CollectionDate DATETIME DEFAULT GETDATE()
+    )
+
+END
+GO
+
+
+INSERT INTO dbo.BackupMonitoringHistory
+(
+    DatabaseName,
+    BackupStartDate,
+    BackupFinishDate,
+    BackupType,
+    DurationSeconds,
+    BackupSizeMB,
+    CompressedBackupSizeMB,
+    ChecksumStatus,
+    LastLSN,
+    FirstLSN,
+    Wait_BACKUPIO,
+    Wait_WRITELOG,
+    Wait_ASYNC_IO_COMPLETION
+)
+
+SELECT
+    bs.database_name,
+    bs.backup_start_date,
+    bs.backup_finish_date,
+    CASE bs.type
+        WHEN 'D' THEN 'FULL'
+        WHEN 'I' THEN 'DIFF'
+        WHEN 'L' THEN 'LOG'
+        ELSE 'OTHER'
+    END AS BackupType,
+    DATEDIFF(
+        SECOND,
+        bs.backup_start_date,
+        bs.backup_finish_date
+    ) AS DurationSeconds,
+    CAST(bs.backup_size / 1048576.0 AS DECIMAL(18,2))
+        AS BackupSizeMB,
+    CAST(bs.compressed_backup_size / 1048576.0 AS DECIMAL(18,2))
+        AS CompressedBackupSizeMB,
+    CASE
+        WHEN bs.has_backup_checksums = 1
+        THEN 1
+        ELSE 0
+    END AS ChecksumStatus,
+    bs.last_lsn,
+    bs.first_lsn,
+    ISNULL(ws_backupio.wait_time_ms,0)
+        AS Wait_BACKUPIO,
+    ISNULL(ws_writelog.wait_time_ms,0)
+        AS Wait_WRITELOG,
+    ISNULL(ws_asyncio.wait_time_ms,0)
+        AS Wait_ASYNC_IO_COMPLETION
+FROM msdb.dbo.backupset bs
+OUTER APPLY
+(
+    SELECT wait_time_ms
+    FROM sys.dm_os_wait_stats
+    WHERE wait_type = 'BACKUPIO'
+) ws_backupio
+OUTER APPLY
+(
+    SELECT wait_time_ms
+    FROM sys.dm_os_wait_stats
+    WHERE wait_type = 'WRITELOG'
+) ws_writelog
+OUTER APPLY
+(
+    SELECT wait_time_ms
+    FROM sys.dm_os_wait_stats
+    WHERE wait_type = 'ASYNC_IO_COMPLETION'
+) ws_asyncio
+WHERE bs.backup_start_date >= DATEADD(DAY,-1,GETDATE())
+ORDER BY bs.backup_start_date
+GO
+
+
+/*
+=========================================================
+3. VERIFY DATA
+=========================================================
+*/
+
+SELECT
+    *
+FROM dbo.BackupMonitoringHistory
+ORDER BY BackupStartDate DESC
+
+GO
