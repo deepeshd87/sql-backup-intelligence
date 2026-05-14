@@ -101,7 +101,7 @@ OUTER APPLY
     FROM sys.dm_os_wait_stats
     WHERE wait_type = 'ASYNC_IO_COMPLETION'
 ) ws_asyncio
-WHERE bs.backup_start_date >= DATEADD(DAY,-1,GETDATE())
+WHERE bs.backup_start_date >= DATEADD(HOUR,-1,GETDATE())
 ORDER BY bs.backup_start_date
 GO
 
