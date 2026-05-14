@@ -1,0 +1,207 @@
+import pyodbc 
+import pandas as pd
+import numpy as np 
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import LabelEncoder
+from sklearn.linear_model import LinearRegression
+
+pd.set_option('display.max_columns', None)
+
+# Prevent line wrapping
+pd.set_option('display.expand_frame_repr', False)
+
+# Very large display width
+pd.set_option('display.width', 10000)
+
+# Show full column content
+pd.set_option('display.max_colwidth', None)
+
+# Show all rows if needed
+pd.set_option('display.max_rows', None)
+
+conn = pyodbc.connect(
+    "DRIVER={ODBC Driver 17 for SQL Server};"
+    "SERVER=ServerName;"
+    "DATABASE=DatabaseName;"
+    "UID=UserName;"
+    "PWD=Password;"
+)
+
+query = """ SELECT  BackupID,DatabaseName,
+    BackupStartDate,
+    BackupFinishDate,
+    BackupType,
+    DurationSeconds,
+    BackupSizeMB,
+    CompressedBackupSizeMB,
+    ChecksumStatus,
+    LastLSN,
+    FirstLSN,
+    Wait_BACKUPIO,
+    Wait_WRITELOG,
+    Wait_ASYNC_IO_COMPLETION FROM dbo.BackupMonitoringHistory WHERE BackupStartDate >= DATEADD(DAY,-30,GETDATE()) """
+df = pd.read_sql_query(query, conn)
+
+# Duration
+
+df["DurationSeconds"] = df["DurationSeconds"].replace(0, np.nan)
+df = df.fillna(0)
+
+# IO_Throughput
+df["IO_Throughput_MBPS"] = df["BackupSizeMB"] / df["DurationSeconds"]
+
+# Compression Ratio
+df["Compression_Ratio"] = df["BackupSizeMB"] / df["CompressedBackupSizeMB"].replace(0,1)
+
+df = df.sort_values(["DatabaseName", "BackupStartDate","BackupType"])
+
+# GrowthRate
+df["PreviousBackupSizeMB"] = (df.groupby(["DatabaseName","BackupType"])["BackupSizeMB"].shift(1))
+df["GrowthRate"] = (df["BackupSizeMB"] - df["PreviousBackupSizeMB"]) /df["PreviousBackupSizeMB"].replace(0, np.nan)
+
+# Replace infinities
+df["GrowthRate"] = df["GrowthRate"].replace([np.inf, -np.inf],np.nan)
+
+# Fill NaN
+df["GrowthRate"] = df["GrowthRate"].fillna(0)
+
+# Cap extreme values
+df["GrowthRate_Capped"] = df["GrowthRate"].clip(-5, 5)
+
+
+# RollingAvgDuration
+df["RollingAvgDuration"] = (df.groupby("DatabaseName")["DurationSeconds"].transform(lambda x: x.rolling(7, min_periods=1).mean()))
+
+
+# RollingAvgThroughput
+df["RollingAvgThroughput"] = (df.groupby("DatabaseName")["IO_Throughput_MBPS"].transform(lambda x: x.rolling(7, min_periods=1).mean()))
+
+# WAIT_BACKUPIO
+df["PrevWait_BACKUPIO"] = df.groupby("DatabaseName")["Wait_BACKUPIO"].shift(1)
+
+df["Delta_WAIT_BACKUPIO"] = (df["Wait_BACKUPIO"] - df["PrevWait_BACKUPIO"]).fillna(0)
+
+df["Wait_BACKUPIO_Norm"] = (df["Delta_WAIT_BACKUPIO"] / df["DurationSeconds"].replace(0, 1))
+
+# WRITELOG
+df["PrevWait_WRITELOG"] = df.groupby("DatabaseName")["Wait_WRITELOG"].shift(1)
+
+df["Delta_WRITELOG"] = (df["Wait_WRITELOG"] - df["PrevWait_WRITELOG"]).fillna(0)
+
+df["Wait_WRITELOG_Norm"] = (df["Delta_WRITELOG"] / df["DurationSeconds"].replace(0, 1))
+
+# Features of the model
+
+features = [
+    "DurationSeconds",
+    "BackupSizeMB",
+    "CompressedBackupSizeMB",
+    "IO_Throughput_MBPS",
+    "Compression_Ratio",
+    "GrowthRate",
+    "Wait_BACKUPIO_Norm",
+    "Wait_WRITELOG_Norm"
+]
+
+results = []
+
+for db_name in df["DatabaseName"].unique():
+
+    df_db = df[df["DatabaseName"] == db_name].copy()
+
+    df_db["AnomalyReason"] = "NONE"
+    df_db["AnomalyDeviation"] = 0.0
+
+# Machine Learning model
+    model = IsolationForest(
+            contamination=0.03,
+            random_state=42
+        )
+
+    df_db["Anomaly"] = model.fit_predict(df_db[features])
+
+    SLA_SECONDS = 3600
+    df_db["SLA_Risk"] = np.where(df_db["DurationSeconds"] > SLA_SECONDS,"HIGH","NORMAL")
+
+    df_db["PredictedFailureRisk"] = np.where(((df_db["GrowthRate_Capped"] > 3) |(df_db["IO_Throughput_MBPS"] < 20) & (df_db["DurationSeconds"] > 5)),"HIGH","LOW")
+
+    df_db["BackupIO_Risk"] = np.where((df_db["Delta_WAIT_BACKUPIO"] > df_db["Delta_WAIT_BACKUPIO"].rolling(7, min_periods=1).mean() + 2 * df_db["Delta_WAIT_BACKUPIO"].rolling(7, min_periods=1).std()),"HIGH","NORMAL")
+
+
+    def root_cause(row):
+        if row["Compression_Ratio"] < 1:
+            return "Compression may be disabled"
+
+        if (row["IO_Throughput_MBPS"] < 20) and (row["DurationSeconds"] > 5):
+            return "Possible storage bottleneck"
+
+        if row["BackupIO_Risk"] == "HIGH":
+            return "High BACKUPIO waits detected"
+
+        if ((row["Delta_WRITELOG"] > 10000) and
+            (row["IO_Throughput_MBPS"] < row["RollingAvgThroughput"] * 0.7) and
+            (row["DurationSeconds"] > row["RollingAvgDuration"] * 1.5)
+           ):
+            return "Possible WRITELOG contention impacting backup throughput"
+        
+        if row["GrowthRate"] > 3:
+            return "Backup size increase detected"
+
+        return "No obvious issue"
+
+    df_db["RootCauseHint"] = df_db.apply(root_cause,axis=1)
+
+    df_logs = df_db[df_db["BackupType"] == "LOG"].copy()
+    df_logs = df_logs.sort_values(["DatabaseName","BackupStartDate"])
+    df_logs["PrevLastLSN"] = (df_logs.groupby("DatabaseName")["LastLSN"].shift(1))
+
+    df_logs["BrokenLSNChain"] = np.where(df_logs["PrevLastLSN"].isna(),0,np.where(np.isclose(df_logs["FirstLSN"],df_logs["PrevLastLSN"]),0,1))
+    df_db.loc[df_logs.index, "BrokenLSNChain"] = df_logs["BrokenLSNChain"]
+
+    df_db["BrokenLSNChain"] = df_db["BrokenLSNChain"].fillna(0).astype(int)
+
+    deviation_scores = abs(df_db[features] - df_db[features].median())
+
+    df_db["AnomalyReason"] = (deviation_scores.idxmax(axis=1))
+
+    anomalies = df_db[
+            (df_db["Anomaly"] == -1) |
+            (df_db["SLA_Risk"] == "HIGH") |
+            (df_db["PredictedFailureRisk"] == "HIGH") |
+            (df_db["BrokenLSNChain"] == 1)
+        ]
+
+    results.append(anomalies)
+
+
+if results:
+
+    final_df = pd.concat(results)
+
+    print("\n========== AI BACKUP MONITORING RESULTS ==========\n")
+
+    print(
+        final_df[
+            [
+                "BackupID",
+                "DatabaseName",
+                "BackupType",
+                "BackupStartDate",
+              #  "BackupSizeMB",
+                # "GrowthRate",
+                # "IO_Throughput_MBPS",
+                # "Delta_WAIT_BACKUPIO",
+                # "Delta_WRITELOG",
+                # "Compression_Ratio",
+                "PredictedFailureRisk",
+                "SLA_Risk",
+               # "BrokenLSNChain",
+                "RootCauseHint",
+                "AnomalyReason",
+            ]
+        ]
+    )
+
+else:
+
+    print("No significant backup anomalies detected.")
