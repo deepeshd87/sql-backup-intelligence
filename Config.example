@@ -1,0 +1,18 @@
+# Copy this file to config.yaml and edit with your details.
+# config.yaml is git-ignored so your credentials are never committed.
+
+database:
+  driver: "ODBC Driver 17 for SQL Server"
+  server: "YOUR_SERVER_NAME"
+  database: "YOUR_DATABASE_NAME"
+  # Use trusted (Windows) auth OR username/password — not both.
+  trusted_connection: true
+  # username: "YOUR_USERNAME"
+  # password: "YOUR_PASSWORD"
+
+detection:
+  sla_seconds: 3600          # backup duration SLA (1 hour)
+  contamination: 0.03        # expected anomaly rate (~3% of records)
+  rolling_window_days: 7     # rolling-baseline window
+  growth_rate_cap: 5         # cap extreme growth-rate values at ±5x
+  lookback_days: 30          # how much history to analyze per run
