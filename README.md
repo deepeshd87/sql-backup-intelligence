@@ -76,14 +76,14 @@ cp config.example.yaml config.yaml
 #   then edit config.yaml with your server details
 
 # 4. Create the telemetry table (one-time)
-#    Run sql/create_table.sql against your SQL Server instance
+#    Run BackupMonitoringHistoryTable.sql against your SQL Server instance
 
 # 5. Collect backup history, then run detection
-python collect_telemetry.py       # populates the telemetry table from msdb
-python detect_anomalies.py        # runs the hybrid detection and prints alerts
+Run DataCollection.sql       # populates the telemetry table from msdb
+python DetectUnusualPattern.py        # runs the hybrid detection and prints alerts
 ```
 
-> **First run note:** anomaly detection needs history to learn from. Let `collect_telemetry.py` run on a schedule for at least 7–14 days (ideally a few weeks) before the model output becomes meaningful. On day one you'll mostly see rule-based alerts, which is expected.
+> **First run note:** anomaly detection needs history to learn from. Let `DataCollection` run on a schedule for at least 7–14 days (ideally a few weeks) before the model output becomes meaningful. On day one you'll mostly see rule-based alerts, which is expected.
 
 ---
 
