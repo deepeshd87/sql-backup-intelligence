@@ -127,26 +127,6 @@ detection:
 
 ---
 
-## Repository structure
-
-> ⚠️ **Reconcile this with your actual files before publishing.** The repo currently contains folders named `Data Collection/` and `DetectUnusualPattern/`. The layout below is the recommended target structure — rename/move your existing files to match it, or edit this section to reflect what's actually there. Do not ship a README that describes files that don't exist.
-
-```
-sql-backup-intelligence/
-├── README.md
-├── LICENSE
-├── requirements.txt              # <-- add this (see dependencies above)
-├── config.example.yaml           # <-- add this (committed template)
-├── config.yaml                   # <-- user-created, git-ignored
-├── .gitignore                    # <-- add config.yaml, __pycache__, etc.
-├── sql/
-│   └── create_table.sql          # telemetry table DDL (from "Data Collection")
-├── collect_telemetry.py          # msdb -> telemetry table (from "Data Collection")
-└── detect_anomalies.py           # feature engineering + ML + rules (from "DetectUnusualPattern")
-```
-
----
-
 ## Roadmap
 
 - [ ] `pip install`-able package (PyPI release)
